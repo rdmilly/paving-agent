@@ -59,34 +59,27 @@ func runScan(ctx context.Context) {
 
 func runTrace(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("trace", flag.ExitOnError)
-	iface := fs.String("iface", "", "interface to capture on (default: auto-detect from routes)")
-	duration := fs.Duration("duration", 60*time.Second, "capture duration (e.g., 60s, 5s for testing)")
-	_ = fs.Parse(args)
-
-	// Auto-detect default interface if not provided.
-	selectedIface := *iface
-	if selectedIface == "" {
-		scan, err := scanner.Scan(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "iface auto-detect: %v\n", err)
-			os.Exit(1)
-		}
-		for _, r := range scan.Routes {
-			if r.IsDefault && r.Interface != "" {
-				selectedIface = r.Interface
-				break
-			}
-		}
-		if selectedIface == "" {
-			fmt.Fprintln(os.Stderr, "no default route found; specify --iface explicitly")
-			os.Exit(1)
-		}
+	iface := fs.String("interface", "", "interface to capture on (default: auto-detect from scanner's default route)")
+	durationSec := fs.Int("duration", 60, "capture duration in seconds")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
 	}
 
-	fmt.Fprintf(os.Stderr, "capturing on %s for %s... (needs root/CAP_NET_RAW)\n", selectedIface, *duration)
-	policy, err := trace.Capture(ctx, selectedIface, *duration)
+	// Auto-detect interface from the scanner's route collector when not specified.
+	// Keeps trace and scan consistent without user having to eyeball `ip route`.
+	if *iface == "" {
+		resolved, err := detectDefaultInterface(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "auto-detect interface failed: %v\nspecify --interface explicitly\n", err)
+			os.Exit(1)
+		}
+		*iface = resolved
+	}
+
+	fmt.Fprintf(os.Stderr, "capturing on %s for %ds...\n", *iface, *durationSec)
+	policy, err := trace.Capture(ctx, *iface, time.Duration(*durationSec)*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "trace failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "capture failed: %v\n", err)
 		os.Exit(1)
 	}
 	if err := trace.WriteJSON(os.Stdout, policy); err != nil {
@@ -95,24 +88,41 @@ func runTrace(ctx context.Context, args []string) {
 	}
 }
 
+// detectDefaultInterface asks the scanner's route collector which interface
+// owns the default route. Used when `trace` is invoked without --interface.
+func detectDefaultInterface(ctx context.Context) (string, error) {
+	routes, warnings := scanner.CollectRoutes(ctx)
+	for _, r := range routes {
+		if r.IsDefault && r.Interface != "" {
+			return r.Interface, nil
+		}
+	}
+	if len(warnings) > 0 {
+		return "", fmt.Errorf("%s", warnings[0])
+	}
+	return "", fmt.Errorf("no default route found")
+}
+
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `paving-agent %s
 
-usage: paving-agent <command>
+usage: paving-agent <command> [flags]
 
 commands:
-  scan       Discover services, processes, containers, connections on this node.
-             Outputs NodeScan JSON to stdout.
-  trace      Passive packet trace; generates connection_policy.json baseline.
-             Flags: --iface <name>  (default: auto-detect from routes)
-                    --duration <D>  (default: 60s)
-  version    Print version.
-  help       Show this help.
+  scan                      Discover services, processes, containers, connections.
+                            Outputs NodeScan JSON to stdout.
+  trace [flags]             60s passive packet capture via tcpdump.
+                            Outputs ConnectionPolicy JSON to stdout.
+    --interface <name>      Interface to capture on (default: auto-detect default route).
+    --duration <seconds>    Capture duration (default: 60).
+  version                   Print version.
+  help                      Show this help.
 
 planned (not yet implemented):
   intake     Streaming LLM dialogue; generates IntentModel JSON.
   probe      Install health-check probes for discovered services.
   register   POST NodeDefinition + IntentModel to Helix.
   chat       Local CLI chat with Claude, pre-loaded with node context.
+  install    Full Phase-1 run-all: scan → trace → intake → probe → register.
 `, version)
 }
