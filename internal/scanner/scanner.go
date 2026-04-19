@@ -15,33 +15,52 @@ import (
 	"time"
 )
 
-// Version of the NodeScan schema. Bump on breaking changes.
+// SchemaVersion of the NodeScan document. Bump on breaking changes.
 const SchemaVersion = "1"
 
 // Scan collects ground-truth state from the local node and returns a NodeScan.
-// Context is accepted for cancellation but current implementation does not
-// use it; subcommands like `ss` and `docker ps` run to completion quickly.
+//
+// Collectors run sequentially. They're all fast (<1s each on a typical node),
+// and the ordering is deliberate: Host first (fails fast if /proc is broken),
+// Processes before Ports (so we have PIDs to cross-reference), Containers
+// after Ports (so we've already noticed a listening 2375 before we ask docker
+// itself). Each collector fails soft — a missing binary or permission denial
+// adds a warning to the NodeScan but never aborts the whole scan.
 func Scan(ctx context.Context) (*NodeScan, error) {
 	start := time.Now()
-
 	scan := &NodeScan{
 		SchemaVersion: SchemaVersion,
 		CapturedAt:    start.UTC().Format(time.RFC3339),
 	}
 
-	// TODO(phase-1.1): Populate each section.
-	//   - Host (hostname, kernel, distro, uptime, resources)
-	//   - Ports (ss -tlnp: listening TCP sockets + owning process)
-	//   - Processes (ps: pid, cmd, user, memory)
-	//   - Containers (docker ps --format JSON)
-	//   - Services (systemctl list-units --type=service --state=running)
-	//   - Connections (ss -tnp: established outbound connections)
-	//   - Routes (ip route: default interface, gateway)
-	//
-	// Each collector must:
-	//   - Fail soft: missing binary (e.g., no docker) produces empty section + warning, not fatal.
-	//   - Be idempotent and side-effect free.
-	//   - Complete in under a second on a typical node.
+	host, warnings := CollectHost(ctx)
+	scan.Host = host
+	scan.Warnings = append(scan.Warnings, warnings...)
+
+	procs, tree, w := CollectProcesses(ctx)
+	scan.Processes = procs
+	scan.ProcessTree = tree
+	scan.Warnings = append(scan.Warnings, w...)
+
+	ports, w := CollectPorts(ctx)
+	scan.Ports = ports
+	scan.Warnings = append(scan.Warnings, w...)
+
+	conns, w := CollectConnections(ctx)
+	scan.Connections = conns
+	scan.Warnings = append(scan.Warnings, w...)
+
+	containers, w := CollectContainers(ctx)
+	scan.Containers = containers
+	scan.Warnings = append(scan.Warnings, w...)
+
+	services, w := CollectServices(ctx)
+	scan.Services = services
+	scan.Warnings = append(scan.Warnings, w...)
+
+	routes, w := CollectRoutes(ctx)
+	scan.Routes = routes
+	scan.Warnings = append(scan.Warnings, w...)
 
 	scan.DurationMS = time.Since(start).Milliseconds()
 	return scan, nil
