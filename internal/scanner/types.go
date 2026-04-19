@@ -15,6 +15,10 @@ type NodeScan struct {
 	Connections []Connection `json:"connections"`
 	Routes      []Route      `json:"routes"`
 
+	// ProcessTree is a derived, sorted parent→children view over Processes.
+	// Present so consumers don't have to re-walk PPIDs to reason about lineage.
+	ProcessTree []ProcessRelation `json:"process_tree"`
+
 	// Warnings collects soft failures (missing binaries, permission issues)
 	// that did not prevent a scan but left a section empty or partial.
 	Warnings []string `json:"warnings"`
@@ -50,6 +54,14 @@ type Process struct {
 	User     string `json:"user"`
 	Command  string `json:"command"`
 	MemoryKB int64  `json:"memory_kb"`
+}
+
+// ProcessRelation is one edge in the process tree: a parent spawned a child.
+// The tree is derived from the flat Process list by walking PPIDs. Cycles
+// are impossible in a real Linux process tree, so this is always a DAG.
+type ProcessRelation struct {
+	ParentPID int   `json:"parent_pid"`
+	ChildPIDs []int `json:"child_pids"`
 }
 
 // Container is a Docker container as reported by `docker ps`.
